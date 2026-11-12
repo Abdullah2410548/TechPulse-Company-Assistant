@@ -1,0 +1,38 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Chroma database and local vector storage
+chroma_db/
+.chroma/
+
+# Generated experiment results
+retrieval_experiment_results.csv
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
