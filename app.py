@@ -1,31 +1,78 @@
-
 import os
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
 ROOT = Path(__file__).parent
 DOCS_DIR = ROOT / "documents"
 
+# -------------------- Page Config --------------------
 st.set_page_config(
-    page_title="TechPulse | Company Knowledge Assistant",
+    page_title="TechPulse | Knowledge Assistant",
     page_icon="🤖",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("🤖 TechPulse Skill Academy")
-st.caption("Company Knowledge Assistant | Module 08 RAG Assignment")
-st.info(
-    "Fictional classroom prototype. Answers are based on the supplied Markdown "
-    "documents; verify important decisions with academy administration."
+# -------------------- Custom ChatGPT/Gemini Style CSS --------------------
+st.markdown(
+    """
+    <style>
+    /* Main container width */
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 7rem;
+        max-width: 900px;
+    }
+
+    /* Center the bottom chat input box */
+    div[data-testid="stChatInput"] {
+        max-width: 900px;
+        margin: 0 auto;
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+
+    /* Rounded modern styling for the input bar */
+    div[data-testid="stChatInput"] > div {
+        border-radius: 24px !important;
+        border: 1px solid rgba(128, 128, 128, 0.3) !important;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+    }
+
+    /* Chat message bubbles */
+    div[data-testid="stChatMessage"] {
+        padding: 1rem 1.25rem;
+        border-radius: 12px;
+        margin-bottom: 0.75rem;
+        border: 1px solid rgba(128, 128, 128, 0.15);
+    }
+
+    /* Quick prompt buttons */
+    div.stButton > button {
+        border-radius: 10px;
+        border: 1px solid rgba(128, 128, 128, 0.25);
+        transition: all 0.2s ease-in-out;
+        text-align: left;
+    }
+    div.stButton > button:hover {
+        border-color: #10a37f;
+        color: #10a37f;
+        transform: translateY(-1px);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
 )
+
 
 # -------------------- Document metadata --------------------
 def policy_metadata(filename: str) -> dict:
@@ -90,9 +137,10 @@ def build_vector_db(chunk_size: int, chunk_overlap: int):
 def is_historical_question(question: str) -> bool:
     q = question.lower()
     historical_terms = [
-        "old policy", "previous policy", "archived", "version 1",
-        "policy 1.0", "historical", "purani policy", "pichli policy",
-        "old rule", "pehle kya"
+        "old policy", "previous policy", "previous", "prior policy",
+        "prior", "archived", "version 1", "v1.0", "policy 1.0",
+        "historical", "purani policy", "pichli policy", "old rule",
+        "pehle kya"
     ]
     return any(term in q for term in historical_terms)
 
@@ -111,90 +159,71 @@ def retrieve(question: str, k: int, chunk_size: int, chunk_overlap: int):
     db = build_vector_db(chunk_size, chunk_overlap)
     q = question.lower()
 
-    # Comparison questions need evidence from BOTH policy versions.
     comparison_terms = [
-        "compare",
-        "comparison",
-        "difference between",
-        "differences between",
-        "current policy and previous policy",
-        "current and previous policy",
-        "compare the current policy",
-        "compare current and previous"
+        "compare", "comparison", "difference between", "differences between",
+        "current policy and previous policy", "current and previous policy",
+        "compare the current policy", "compare current and previous"
     ]
-
     is_comparison = any(term in q for term in comparison_terms)
+
+    # Use a focused search phrase so a section heading is less likely to outrank
+    # the paragraph that actually contains the policy rule.
+    if any(term in q for term in ["attendance", "attend", "absent"]):
+        search_question = (
+            "attendance requirement minimum percentage of scheduled sessions "
+            "attendance exceptions catch-up activity"
+        )
+    elif any(term in q for term in ["refund", "withdraw", "cancel"]):
+        search_question = (
+            "refund amount percentage withdrawal notice period course cancellation "
+            "refund processing"
+        )
+    elif any(term in q for term in ["registration", "enrol", "enroll"]):
+        search_question = "registration deadline late registration course start date"
+    elif "certificate" in q:
+        search_question = "certificate eligibility attendance final project fees"
+    else:
+        search_question = question
+
+    def has_substantive_content(doc):
+        # Ignore heading-only chunks such as just '## 2. Attendance'.
+        content_lines = [
+            line.strip() for line in doc.page_content.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        return len(" ".join(content_lines)) >= 60
 
     if is_comparison:
         selected = []
-        seen = set()
-
-        # Retrieve each policy separately.
         for filename in ("current_policy.md", "previous_policy.md"):
             policy_docs = db.similarity_search(
-                question,
-                k=max(k, 3),
+                search_question,
+                k=max(6, k * 3),
                 filter={"source": filename}
             )
+            useful_docs = [doc for doc in policy_docs if has_substantive_content(doc)]
+            selected.extend(useful_docs[:max(1, (k + 1) // 2)])
 
-            for doc in policy_docs:
-                key = (
-                    doc.metadata.get("source"),
-                    doc.metadata.get("start_index")
-                )
+        # A comparison must include evidence from both policy versions.
+        return selected[:2] if k == 1 else selected[:k]
 
-                if key not in seen:
-                    selected.append(doc)
-                    seen.add(key)
-
-        return selected
-
-    semantic_docs = db.similarity_search(
-        question,
-        k=max(k * 4, 12)
-    )
-
-    selected = []
-    seen = set()
-
-    # For a single-version policy question, prioritize the requested version.
     if is_policy_question(question):
         target = (
             "previous_policy.md"
             if is_historical_question(question)
             else "current_policy.md"
         )
-
         policy_docs = db.similarity_search(
-            question,
-            k=k,
+            search_question,
+            k=max(12, k * 4),
             filter={"source": target}
         )
+        # Policy questions must be answered from the requested policy only.
+        # Do not fill missing slots with unrelated or archived-document chunks.
+        useful_docs = [doc for doc in policy_docs if has_substantive_content(doc)]
+        return useful_docs[:k]
 
-        for doc in policy_docs:
-            key = (
-                doc.metadata.get("source"),
-                doc.metadata.get("start_index")
-            )
-
-            if key not in seen:
-                selected.append(doc)
-                seen.add(key)
-
-    for doc in semantic_docs:
-        key = (
-            doc.metadata.get("source"),
-            doc.metadata.get("start_index")
-        )
-
-        if key not in seen:
-            selected.append(doc)
-            seen.add(key)
-
-        if len(selected) >= k:
-            break
-
-    return selected[:k]
+    return db.similarity_search(question, k=k)
 
 
 def build_prompt(question: str, docs) -> str:
@@ -255,7 +284,15 @@ def get_llm(api_key: str):
     )
 
 
+# -------------------- Initialization --------------------
 api_key = os.getenv("GROQ_API_KEY")
+
+# Streamlit Community Cloud stores deployment secrets in st.secrets.
+if not api_key:
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY")
+    except Exception:
+        api_key = None
 
 if not api_key:
     st.error(
@@ -269,94 +306,166 @@ except Exception as exc:
     st.error(f"Groq setup error: {exc}")
     st.stop()
 
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# -------------------- Sidebar controls --------------------
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
+
+
+# -------------------- Sidebar Navigation & Settings --------------------
 with st.sidebar:
-    st.header("RAG settings")
-    chunk_size = st.selectbox("Chunk size", [300, 500, 700], index=1)
-    chunk_overlap = st.selectbox("Chunk overlap", [30, 50, 100], index=1)
-    k_value = st.selectbox("Retrieved chunks (k)", [1, 2, 3, 5], index=2)
-    st.caption("Changing chunk settings rebuilds the in-memory vector index.")
-
-
-chat_tab, experiment_tab, about_tab = st.tabs(
-    ["Ask TechPulse", "Retrieval experiments", "About"]
-)
-
-
-# -------------------- Ask TechPulse --------------------
-with chat_tab:
-
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stFormSubmitButton"] button {
-            background-color: #198754 !important;
-            color: white !important;
-            border: 1px solid #198754 !important;
-        }
-
-        div[data-testid="stFormSubmitButton"] button:hover {
-            background-color: #157347 !important;
-            border-color: #157347 !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
+    st.markdown("## 🤖 TechPulse AI")
+    
+    navigation = st.radio(
+        "Navigation",
+        ["💬 Ask TechPulse", "🧪 Retrieval Experiments", "📘 About"],
+        label_visibility="collapsed"
     )
 
-    with st.form(key="question_form"):
-        question = st.text_input(
-            "Enter your question",
-            placeholder="What is the current attendance requirement?"
-        )
+    st.divider()
 
-        submitted = st.form_submit_button("Get answer")
+    if st.button("➕ New Chat / Clear History", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.pending_prompt = None
+        st.rerun()
 
-    if submitted:
-        if not question.strip():
-            st.warning("Please enter a question.")
+    st.divider()
+    st.markdown("### ⚙️ RAG Settings")
+    chunk_size = st.selectbox("Chunk size", [300, 500, 700], index=1)
+    chunk_overlap = st.selectbox("Chunk overlap", [30, 50, 100], index=1)
+    k_value = st.selectbox("Retrieved chunks (k)", [1, 2, 3], index=2)
+    st.caption(
+        f"Each answer uses up to {k_value} retrieved chunks. "
+        "For a policy comparison, k=1 retrieves one chunk from each policy "
+        "so both versions can be compared."
+    )
+    st.caption("Changing chunk size or overlap rebuilds the in-memory vector index.")
 
-        else:
-            try:
-                with st.spinner("Searching the knowledge base..."):
-                    found_docs = retrieve(
-                        question, k_value, chunk_size, chunk_overlap
+    st.divider()
+    st.info(
+        "ℹ️ **Note:** Answers are based strictly on supplied Markdown "
+        "documents. Verify official decisions with academy administration."
+    )
+
+
+# Helper function to render source filenames and the exact retrieved excerpts.
+def render_sources(docs):
+    if not docs:
+        st.caption("No supporting document chunks were retrieved.")
+        return
+
+    with st.expander(f"📚 Sources & relevant excerpts ({len(docs)} chunks)", expanded=False):
+        for i, doc in enumerate(docs, start=1):
+            source = doc.metadata.get("source", "unknown")
+            version = doc.metadata.get("policy_version", "N/A")
+            status = doc.metadata.get("status", "unknown")
+            badge = "🟢 Current" if status == "current" else "🟠 Archived"
+            st.markdown(f"**Source {i}: `{source}`**")
+            st.caption(f"Policy version: {version} · Status: {badge}")
+            st.markdown("**Relevant excerpt retrieved from this document:**")
+            st.info(doc.page_content)
+            if i < len(docs):
+                st.divider()
+
+
+# ==================== PAGE 1: CHAT ASSISTANT ====================
+if navigation == "💬 Ask TechPulse":
+    st.title("🤖 TechPulse Skill Academy")
+    st.caption("Company Knowledge Assistant | Module 08 RAG Assignment")
+    st.caption(
+        f"Current retrieval settings: {k_value} chunk(s) · "
+        f"chunk size {chunk_size} · overlap {chunk_overlap}"
+    )
+
+    # Keep the four suggested questions visible above the chat at all times.
+    st.markdown("### 👋 Suggested questions")
+    st.caption(
+        "Select a suggested question at any time, or type your own question "
+        "in the chat box below."
+    )
+
+    starter_prompts = [
+        "What is the current attendance requirement?",
+        "Compare current and previous refund policies",
+        "How much is the Web Development Foundations course?",
+        "What happens if the academy cancels a class?"
+    ]
+
+    cols = st.columns(2)
+    for idx, sample_q in enumerate(starter_prompts):
+        with cols[idx % 2]:
+            if st.button(
+                f"✨ {sample_q}",
+                key=f"starter_{idx}",
+                use_container_width=True
+            ):
+                st.session_state.pending_prompt = sample_q
+                st.rerun()
+
+    # Render existing chat history inside a proper container so previous messages remain fully visible
+    chat_container = st.container()
+    with chat_container:
+        for msg in st.session_state.messages:
+            avatar = "🧑‍💻" if msg["role"] == "user" else "🤖"
+            with st.chat_message(msg["role"], avatar=avatar):
+                st.markdown(msg["content"])
+                if msg["role"] == "assistant" and "sources" in msg:
+                    render_sources(msg["sources"])
+
+    # Chat input centered and anchored at the bottom
+    user_input = st.chat_input("Ask anything about TechPulse courses, policies, or procedures...")
+    active_question = user_input or st.session_state.pending_prompt
+
+    if active_question:
+        st.session_state.pending_prompt = None
+
+        # Append user message to history
+        st.session_state.messages.append({"role": "user", "content": active_question})
+        
+        # Display user message immediately
+        with chat_container:
+            with st.chat_message("user", avatar="🧑‍💻"):
+                st.markdown(active_question)
+
+        # Generate & display assistant response inside the container
+        with chat_container:
+            with st.chat_message("assistant", avatar="🤖"):
+                try:
+                    with st.spinner("Searching knowledge base..."):
+                        found_docs = retrieve(
+                            active_question, k_value, chunk_size, chunk_overlap
+                        )
+                        result = llm.invoke(
+                            build_prompt(active_question, found_docs)
+                        )
+                        answer_text = result.content
+
+                    st.markdown(answer_text)
+                    render_sources(found_docs)
+
+                    # Save assistant response + retrieved docs to session history
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer_text,
+                        "sources": found_docs
+                    })
+
+                except Exception as exc:
+                    error_msg = f"⚠️ **Question execution error:** {exc}"
+                    st.error(error_msg)
+                    st.caption(
+                        "Please check your internet connection, API key, "
+                        "Groq model availability, installed packages, "
+                        "and documents/ folder."
                     )
 
-                    result = llm.invoke(
-                        build_prompt(question, found_docs)
-                    )
 
-                st.subheader("Answer")
-                st.write(result.content)
-
-                st.subheader("Sources and supporting evidence")
-
-                for i, doc in enumerate(found_docs, start=1):
-                    source = doc.metadata.get("source", "unknown")
-                    version = doc.metadata.get("policy_version", "N/A")
-                    status = doc.metadata.get("status", "unknown")
-
-                    with st.expander(
-                        f"{i}. {source} | Version {version} | {status}"
-                    ):
-                        st.write(doc.page_content)
-
-            except Exception as exc:
-                st.error(f"Question execution error: {exc}")
-                st.caption(
-                    "Please check your internet connection, API key, "
-                    "Groq model availability, installed packages, "
-                    "and documents/ folder."
-                )
-
-
-# -------------------- Retrieval experiments --------------------
-with experiment_tab:
-
+# ==================== PAGE 2: RETRIEVAL EXPERIMENTS ====================
+elif navigation == "🧪 Retrieval Experiments":
+    st.title("🧪 Retrieval Experiments")
     st.markdown(
-        "Compare six fixed questions using k=1, k=3, and k=5. "
+        "Compare six fixed questions using `k=1`, `k=3`, and `k=5`. "
         "Keep documents and chunk settings the same during this comparison."
     )
 
@@ -369,8 +478,7 @@ with experiment_tab:
         "Does TechPulse guarantee a job after a course?"
     ]
 
-    if st.button("Run all six questions for k=1, 3 and 5"):
-
+    if st.button("▶️ Run all six questions for k=1, 3 and 5", type="primary"):
         rows = []
 
         try:
@@ -379,11 +487,9 @@ with experiment_tab:
             done = 0
 
             for q_index, q in enumerate(fixed_questions, start=1):
-
                 st.markdown(f"**Question {q_index}:** {q}")
 
                 for kval in [1, 3, 5]:
-
                     found = retrieve(
                         q, kval, chunk_size, chunk_overlap
                     )
@@ -408,7 +514,6 @@ with experiment_tab:
                     })
 
                     with st.expander(f"View result for k={kval}"):
-
                         st.write("**Retrieved sources:**", sources)
                         st.write(response.content)
 
@@ -421,8 +526,6 @@ with experiment_tab:
                     done += 1
                     progress.progress(done / total)
 
-            import pandas as pd
-
             result_df = pd.DataFrame(rows)
 
             st.success(
@@ -433,7 +536,7 @@ with experiment_tab:
             st.dataframe(result_df, use_container_width=True)
 
             st.download_button(
-                "Download retrieval experiment CSV",
+                "📥 Download retrieval experiment CSV",
                 data=result_df.to_csv(index=False).encode("utf-8-sig"),
                 file_name="retrieval_experiment_results.csv",
                 mime="text/csv"
@@ -441,7 +544,6 @@ with experiment_tab:
 
         except Exception as exc:
             st.error(f"Experiment failed: {exc}")
-
 
     st.divider()
 
@@ -462,8 +564,7 @@ with experiment_tab:
         changed_questions
     )
 
-    if st.button("Run selected question with current chunk settings"):
-
+    if st.button("▶️ Run selected question with current chunk settings"):
         try:
             found = retrieve(
                 chosen, k_value, chunk_size, chunk_overlap
@@ -475,7 +576,7 @@ with experiment_tab:
 
             st.write(response.content)
 
-            st.write(
+            st.info(
                 f"Settings: chunk_size={chunk_size}, "
                 f"overlap={chunk_overlap}, k={k_value}"
             )
@@ -490,9 +591,9 @@ with experiment_tab:
             st.error(f"Chunk experiment failed: {exc}")
 
 
-# -------------------- About --------------------
-with about_tab:
-
+# ==================== PAGE 3: ABOUT ====================
+elif navigation == "📘 About":
+    st.title("📘 About TechPulse Assistant")
     st.markdown("""
     **Company:** TechPulse Skill Academy (fictional).
 
@@ -509,5 +610,3 @@ with about_tab:
     records, verify payments, approve exceptions, or guarantee answer accuracy.
     Important decisions must be confirmed by academy administration.
     """)
-
-

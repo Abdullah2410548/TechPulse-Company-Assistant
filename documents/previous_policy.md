@@ -33,7 +33,7 @@ The rules changed in version 2.0, effective 01 November 2026. The attendance thr
 
 
 ## 7. How to answer historical questions
-If a user asks "what was the old rule?" or specifically mentions version 1.0, quote this archived policy and label it historical. If a user asks "what is the rule now?", use current_policy.txt. If the question does not make clear whether the user wants the old or current rule, prefer the current policy and mention that an archived version differs where relevant.
+If a user asks "what was the old rule?" or specifically mentions version 1.0, quote this archived policy and label it historical. If a user asks "what is the rule now?", use current_policy.md. If the question does not make clear whether the user wants the old or current rule, prefer the current policy and mention that an archived version differs where relevant.
 
 
 ## 8. Limits
